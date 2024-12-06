@@ -1,101 +1,325 @@
-import Image from "next/image";
+"use client";
+import React, { useState, useEffect, useRef, useCallback } from 'react';
+import { Stage, Layer, Line } from 'react-konva';
+import io from 'socket.io-client';
+import { 
+  Paintbrush, 
+  Eraser, 
+  PaletteIcon, 
+  Trash2, 
+  Sliders,
+  Move 
+} from 'lucide-react';
+import Konva from 'konva';
 
-export default function Home() {
+interface DrawingLine {
+  tool: string;
+  points: number[];
+  color: string;
+  strokeWidth: number;
+}
+
+export default function SketchPage() {
+  const [lines, setLines] = useState<DrawingLine[]>([]);
+  const [tool, setTool] = useState('pen');
+  const [color, setColor] = useState('#000000');
+  const [strokeWidth, setStrokeWidth] = useState(5);
+  const [isDrawing, setIsDrawing] = useState(false);
+  const [isColorPickerOpen, setIsColorPickerOpen] = useState(false);
+  const [canvasPosition, setCanvasPosition] = useState({ x: 0, y: 0 });
+  const [canvasScale, setCanvasScale] = useState(1);
+  const stageRef = useRef<Konva.Stage>(null);
+  const socketRef = useRef<any>(null);
+  const lastPositionRef = useRef({ x: 0, y: 0 });
+  const [isMobile, setIsMobile] = useState(false);
+
+  // Detect mobile and prevent default touch behaviors
+  useEffect(() => {
+    const checkMobile = () => {
+      setIsMobile(/Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent));
+    };
+    
+    checkMobile();
+    window.addEventListener('resize', checkMobile);
+
+    // Prevent default touch behaviors
+    const preventDefaults = (e: TouchEvent) => {
+      e.preventDefault();
+    };
+
+    document.addEventListener('touchstart', preventDefaults, { passive: false });
+    document.addEventListener('touchmove', preventDefaults, { passive: false });
+    document.addEventListener('touchend', preventDefaults, { passive: false });
+
+    return () => {
+      window.removeEventListener('resize', checkMobile);
+      document.removeEventListener('touchstart', preventDefaults);
+      document.removeEventListener('touchmove', preventDefaults);
+      document.removeEventListener('touchend', preventDefaults);
+    };
+  }, []);
+
+  // Socket connection effect
+  useEffect(() => {
+    socketRef.current = io('https://canva-backend-n71m.onrender.com', {
+      transports: ['websocket']
+    });
+
+    socketRef.current.on('canvas-state', (initialState: DrawingLine[]) => {
+      setLines(initialState);
+    });
+
+    socketRef.current.on('draw-data', (data: DrawingLine) => {
+      setLines((prevLines) => [...prevLines, data]);
+    });
+
+    socketRef.current.on('canvas-cleared', () => {
+      setLines([]);
+    });
+
+    return () => {
+      if (socketRef.current) {
+        socketRef.current.disconnect();
+      }
+    };
+  }, []);
+
+  // Prevent default touch move behavior and browser zoom
+  useEffect(() => {
+    document.body.style.touchAction = 'none';
+    return () => {
+      document.body.style.touchAction = 'auto';
+    };
+  }, []);
+
+  const getPointerPosition = useCallback((e: any) => {
+    if (!stageRef.current) return null;
+    
+    const stage = stageRef.current;
+    const pointerPos = stage.getPointerPosition();
+    
+    if (!pointerPos) return null;
+
+    // Adjust for canvas position and scale
+    return {
+      x: (pointerPos.x - canvasPosition.x) / canvasScale,
+      y: (pointerPos.y - canvasPosition.y) / canvasScale
+    };
+  }, [canvasPosition, canvasScale]);
+
+  const handleMouseDown = (e: any) => {
+    const pos = getPointerPosition(e);
+    if (!pos) return;
+
+    setIsDrawing(true);
+    setLines((prevLines) => [
+      ...prevLines,
+      { 
+        tool, 
+        points: [pos.x, pos.y], 
+        color, 
+        strokeWidth 
+      }
+    ]);
+
+    // For mobile, store initial touch position for potential panning
+    const touchPos = e.evt || e.touches?.[0];
+    if (touchPos) {
+      lastPositionRef.current = { 
+        x: touchPos.clientX || touchPos.pageX, 
+        y: touchPos.clientY || touchPos.pageY 
+      };
+    }
+  };
+
+  const handleMouseMove = (e: any) => {
+    const pos = getPointerPosition(e);
+    if (!isDrawing || !pos) return;
+
+    // For touch devices, check if it's a drawing or panning action
+    const touchPos = e.evt || e.touches?.[0];
+    if (isMobile && touchPos) {
+      const currentPos = { 
+        x: touchPos.clientX || touchPos.pageX, 
+        y: touchPos.clientY || touchPos.pageY 
+      };
+
+      // Determine if it's a pan or draw based on movement
+      const deltaX = Math.abs(currentPos.x - lastPositionRef.current.x);
+      const deltaY = Math.abs(currentPos.y - lastPositionRef.current.y);
+
+      // If movement is significant, consider it a pan
+      if (deltaX > 10 || deltaY > 10) {
+        // Pan the canvas
+        setCanvasPosition(prev => ({
+          x: prev.x + (currentPos.x - lastPositionRef.current.x),
+          y: prev.y + (currentPos.y - lastPositionRef.current.y)
+        }));
+        lastPositionRef.current = currentPos;
+        return;
+      }
+    }
+
+    // Drawing logic
+    setLines((prevLines) => {
+      const newLines = [...prevLines];
+      const lastLine = newLines[newLines.length - 1];
+      
+      if (lastLine) {
+        lastLine.points = [...lastLine.points, pos.x, pos.y];
+        newLines[newLines.length - 1] = lastLine;
+      }
+      
+      return newLines;
+    });
+
+    // Emit drawing data to other clients
+    socketRef.current?.emit('drawing', lines[lines.length - 1]);
+  };
+
+  const handleMouseUp = () => {
+    setIsDrawing(false);
+  };
+
+  const clearCanvas = () => {
+    setLines([]);
+    socketRef.current?.emit('clear-canvas');
+  };
+
+  // Pinch to zoom for mobile
+  const handleWheel = (e: any) => {
+    e.evt.preventDefault();
+    const scaleBy = 1.1;
+    const stage = e.target.getStage();
+    const oldScale = stage.scaleX();
+    const pointer = stage.getPointerPosition();
+
+    const mousePointTo = {
+      x: (pointer.x - stage.x()) / oldScale,
+      y: (pointer.y - stage.y()) / oldScale,
+    };
+
+    const newScale = e.evt.deltaY > 0 ? oldScale / scaleBy : oldScale * scaleBy;
+
+    setCanvasScale(newScale);
+    setCanvasPosition({
+      x: pointer.x - mousePointTo.x * newScale,
+      y: pointer.y - mousePointTo.y * newScale
+    });
+  };
+
   return (
-    <div className="grid grid-rows-[20px_1fr_20px] items-center justify-items-center min-h-screen p-8 pb-20 gap-16 sm:p-20 font-[family-name:var(--font-geist-sans)]">
-      <main className="flex flex-col gap-8 row-start-2 items-center sm:items-start">
-        <Image
-          className="dark:invert"
-          src="/next.svg"
-          alt="Next.js logo"
-          width={180}
-          height={38}
-          priority
-        />
-        <ol className="list-inside list-decimal text-sm text-center sm:text-left font-[family-name:var(--font-geist-mono)]">
-          <li className="mb-2">
-            Get started by editing{" "}
-            <code className="bg-black/[.05] dark:bg-white/[.06] px-1 py-0.5 rounded font-semibold">
-              src/app/page.tsx
-            </code>
-            .
-          </li>
-          <li>Save and see your changes instantly.</li>
-        </ol>
+    <div className="flex flex-col items-center justify-center min-h-screen bg-gray-50 p-4">
+      <div className="w-full max-w-4xl">
+        {/* Toolbar */}
+        <div className="mb-4 flex flex-wrap items-center justify-center gap-4 bg-white shadow-md rounded-lg p-4 transition-all duration-300 hover:shadow-lg">
+          {/* Tool Selection */}
+          <div className="flex items-center space-x-2">
+            <button 
+              onClick={() => setTool('pen')}
+              className={`p-2 rounded-full transition-all duration-300 ${
+                tool === 'pen' 
+                  ? 'bg-blue-500 text-white' 
+                  : 'hover:bg-blue-100 text-gray-600'
+              }`}
+              title="Pen Tool"
+            >
+              <Paintbrush className="w-5 h-5" />
+            </button>
+            <button 
+              onClick={() => setTool('eraser')}
+              className={`p-2 rounded-full transition-all duration-300 ${
+                tool === 'eraser' 
+                  ? 'bg-red-500 text-white' 
+                  : 'hover:bg-red-100 text-gray-600'
+              }`}
+              title="Eraser Tool"
+            >
+              <Eraser className="w-5 h-5" />
+            </button>
+          </div>
 
-        <div className="flex gap-4 items-center flex-col sm:flex-row">
-          <a
-            className="rounded-full border border-solid border-transparent transition-colors flex items-center justify-center bg-foreground text-background gap-2 hover:bg-[#383838] dark:hover:bg-[#ccc] text-sm sm:text-base h-10 sm:h-12 px-4 sm:px-5"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            <Image
-              className="dark:invert"
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={20}
-              height={20}
+          {/* Color Picker */}
+          <div className="flex items-center justify-center">
+            <button 
+              onClick={() => setIsColorPickerOpen(!isColorPickerOpen)}
+              className="p-2 rounded-full cursor-default"
+              title="Color Picker"
+            >
+              <PaletteIcon className="w-5 h-5 text-gray-600" />
+            </button>
+            <input 
+              type="color" 
+              value={color}
+              onChange={(e) => {
+                setColor(e.target.value);
+                setIsColorPickerOpen(false);
+              }}
+              className="w-12 z-10 cursor-pointer"
             />
-            Deploy now
-          </a>
-          <a
-            className="rounded-full border border-solid border-black/[.08] dark:border-white/[.145] transition-colors flex items-center justify-center hover:bg-[#f2f2f2] dark:hover:bg-[#1a1a1a] hover:border-transparent text-sm sm:text-base h-10 sm:h-12 px-4 sm:px-5 sm:min-w-44"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
+          </div>
+
+          {/* Stroke Width */}
+          <div className="flex items-center space-x-2">
+            <Sliders className="w-4 h-4 text-gray-600" />
+            <input 
+              type="range" 
+              min="1" 
+              max="20" 
+              value={strokeWidth}
+              onChange={(e) => setStrokeWidth(Number(e.target.value))}
+              className="w-24 h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer"
+            />
+          </div>
+
+          {/* Clear Canvas */}
+          <button 
+            onClick={clearCanvas}
+            className="flex items-center space-x-2 bg-red-500 text-white px-4 py-2 rounded-lg hover:bg-red-600 transition-all duration-300"
           >
-            Read our docs
-          </a>
+            <Trash2 className="w-5 h-5" />
+            <span>Clear</span>
+          </button>
         </div>
-      </main>
-      <footer className="row-start-3 flex gap-6 flex-wrap items-center justify-center">
-        <a
-          className="flex items-center gap-2 hover:underline hover:underline-offset-4"
-          href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <Image
-            aria-hidden
-            src="/file.svg"
-            alt="File icon"
-            width={16}
-            height={16}
-          />
-          Learn
-        </a>
-        <a
-          className="flex items-center gap-2 hover:underline hover:underline-offset-4"
-          href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <Image
-            aria-hidden
-            src="/window.svg"
-            alt="Window icon"
-            width={16}
-            height={16}
-          />
-          Examples
-        </a>
-        <a
-          className="flex items-center gap-2 hover:underline hover:underline-offset-4"
-          href="https://nextjs.org?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <Image
-            aria-hidden
-            src="/globe.svg"
-            alt="Globe icon"
-            width={16}
-            height={16}
-          />
-          Go to nextjs.org →
-        </a>
-      </footer>
+
+        {/* Canvas */}
+        <div className="bg-white shadow-md rounded-lg overflow-hidden">
+          <Stage
+            width={window.innerWidth - 40}
+            height={window.innerHeight - 250}
+            onMouseDown={handleMouseDown}
+            onMouseMove={handleMouseMove}
+            onMouseUp={handleMouseUp}
+            onTouchStart={handleMouseDown}
+            onTouchMove={handleMouseMove}
+            onTouchEnd={handleMouseUp}
+            onWheel={handleWheel}
+            x={canvasPosition.x}
+            y={canvasPosition.y}
+            scaleX={canvasScale}
+            scaleY={canvasScale}
+            ref={stageRef}
+            className="bg-white touch-none"
+          >
+            <Layer>
+              {lines.map((line, i) => (
+                <Line
+                  key={i}
+                  points={line.points}
+                  stroke={line.color}
+                  strokeWidth={line.strokeWidth}
+                  tension={0.5}
+                  lineCap="round"
+                  lineJoin="round"
+                  globalCompositeOperation={
+                    line.tool === 'eraser' ? 'destination-out' : 'source-over'
+                  }
+                />
+              ))}
+            </Layer>
+          </Stage>
+        </div>
+      </div>
     </div>
   );
 }
