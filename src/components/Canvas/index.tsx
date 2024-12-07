@@ -1,6 +1,18 @@
 "use client";
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { Stage, Layer, Line } from 'react-konva';
+import dynamic from 'next/dynamic';
+
+const Stage = dynamic(() => import('react-konva').then((mod) => mod.Stage), {
+  ssr: false,
+});
+
+const Layer = dynamic(() => import('react-konva').then((mod) => mod.Layer), {
+  ssr: false,
+});
+
+const Line = dynamic(() => import('react-konva').then((mod) => mod.Line), {
+  ssr: false,
+});
 import io from 'socket.io-client';
 import { 
   Paintbrush, 
