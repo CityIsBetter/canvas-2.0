@@ -7,9 +7,9 @@ import {
   PaletteIcon, 
   Trash2, 
   Sliders,
-  ZoomIn,
-  ZoomOut,
-  Hand
+  // ZoomIn,
+  // ZoomOut,
+  // Hand
 } from 'lucide-react';
 
 // Types
@@ -39,14 +39,14 @@ const DrawingToolbar: React.FC<{
   color, 
   strokeWidth, 
   isColorPickerOpen,
-  canvasScale,
+  // canvasScale,
   setTool, 
   setColor, 
   setStrokeWidth, 
   setIsColorPickerOpen, 
   clearCanvas,
-  zoomIn,
-  zoomOut
+  // zoomIn,
+  // zoomOut
 }) => {
   return (
     <div className="mb-4 flex flex-wrap items-center justify-center gap-4 bg-white shadow-md rounded-lg p-4 transition-all duration-300 hover:shadow-lg">
@@ -168,7 +168,7 @@ export default function Canvas() {
   const lastPositionRef = useRef<{x: number, y: number} | null>(null);
 
   // Socket State
-  const socketRef = useRef<any>(null);
+  const socketRef = useRef<any>(null); // eslint-disable-line @typescript-eslint/no-explicit-any
 
   // Resize canvas to window size
   useEffect(() => {
@@ -392,21 +392,21 @@ export default function Canvas() {
   }, []);
 
   // Wheel zoom
-  const handleWheel = useCallback((e: React.WheelEvent) => {
-    e.preventDefault();
+  // const handleWheel = useCallback((e: React.WheelEvent) => {
+  //   e.preventDefault();
     
-    // Determine zoom direction
-    const delta = e.deltaY < 0 ? 1.1 : 0.9;
+  //   // Determine zoom direction
+  //   const delta = e.deltaY < 0 ? 1.1 : 0.9;
     
-    // Calculate new scale
-    const newScale = canvasScale * delta;
+  //   // Calculate new scale
+  //   const newScale = canvasScale * delta;
     
-    // Limit zoom
-    const limitedScale = Math.min(Math.max(newScale, 0.5), 3);
+  //   // Limit zoom
+  //   const limitedScale = Math.min(Math.max(newScale, 0.5), 3);
     
-    // Update scale
-    setCanvasScale(limitedScale);
-  }, [canvasScale]);
+  //   // Update scale
+  //   setCanvasScale(limitedScale);
+  // }, [canvasScale]);
 
   // Clear canvas
   const clearCanvas = useCallback(() => {
