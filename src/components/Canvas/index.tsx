@@ -1,27 +1,16 @@
 "use client";
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import dynamic from 'next/dynamic';
-
-const Stage = dynamic(() => import('react-konva').then((mod) => mod.Stage), {
-  ssr: false,
-});
-
-const Layer = dynamic(() => import('react-konva').then((mod) => mod.Layer), {
-  ssr: false,
-});
-
-const Line = dynamic(() => import('react-konva').then((mod) => mod.Line), {
-  ssr: false,
-});
 import io from 'socket.io-client';
 import { 
   Paintbrush, 
   Eraser, 
   PaletteIcon, 
   Trash2, 
-  Sliders 
+  Sliders,
+  ZoomIn,
+  ZoomOut,
+  Hand
 } from 'lucide-react';
-import Konva from 'konva';
 
 // Types
 interface DrawingLine {
@@ -37,21 +26,27 @@ const DrawingToolbar: React.FC<{
   color: string;
   strokeWidth: number;
   isColorPickerOpen: boolean;
+  canvasScale: number;
   setTool: (tool: string) => void;
   setColor: (color: string) => void;
   setStrokeWidth: (width: number) => void;
   setIsColorPickerOpen: (open: boolean) => void;
   clearCanvas: () => void;
+  zoomIn: () => void;
+  zoomOut: () => void;
 }> = ({
   tool, 
   color, 
   strokeWidth, 
   isColorPickerOpen,
+  canvasScale,
   setTool, 
   setColor, 
   setStrokeWidth, 
   setIsColorPickerOpen, 
-  clearCanvas
+  clearCanvas,
+  zoomIn,
+  zoomOut
 }) => {
   return (
     <div className="mb-4 flex flex-wrap items-center justify-center gap-4 bg-white shadow-md rounded-lg p-4 transition-all duration-300 hover:shadow-lg">
@@ -79,6 +74,17 @@ const DrawingToolbar: React.FC<{
         >
           <Eraser className="w-5 h-5" />
         </button>
+        {/* <button 
+          onClick={() => setTool('hand')}
+          className={`p-2 rounded-full transition-all duration-300 ${
+            tool === 'hand' 
+              ? 'bg-green-500 text-white' 
+              : 'hover:bg-green-100 text-gray-600'
+          }`}
+          title="Pan Tool"
+        >
+          <Hand className="w-5 h-5" />
+        </button> */}
       </div>
 
       {/* Color Picker */}
@@ -114,6 +120,25 @@ const DrawingToolbar: React.FC<{
         />
       </div>
 
+      {/* Zoom Controls */}
+      {/* <div className="flex items-center space-x-2">
+        <button 
+          onClick={zoomOut}
+          className="p-2 rounded-full hover:bg-gray-100 text-gray-600"
+          title="Zoom Out"
+        >
+          <ZoomOut className="w-5 h-5" />
+        </button>
+        <span className="text-sm text-black">{Math.round(canvasScale * 100)}%</span>
+        <button 
+          onClick={zoomIn}
+          className="p-2 rounded-full hover:bg-gray-100 text-gray-600"
+          title="Zoom In"
+        >
+          <ZoomIn className="w-5 h-5" />
+        </button>
+      </div> */}
+
       {/* Clear Canvas */}
       <button 
         onClick={clearCanvas}
@@ -128,42 +153,37 @@ const DrawingToolbar: React.FC<{
 
 // Main Canvas Drawing Component
 export default function Canvas() {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
   const [lines, setLines] = useState<DrawingLine[]>([]);
   const [tool, setTool] = useState('pen');
   const [color, setColor] = useState('#000000');
   const [strokeWidth, setStrokeWidth] = useState(5);
   const [isDrawing, setIsDrawing] = useState(false);
   const [isColorPickerOpen, setIsColorPickerOpen] = useState(false);
-  const [canvasPosition, setCanvasPosition] = useState({ x: 0, y: 0 });
+  const [canvasSize, setCanvasSize] = useState({ width: 0, height: 0 });
+  
+  // Zoom and Pan State
   const [canvasScale, setCanvasScale] = useState(1);
-  const stageRef = useRef<Konva.Stage>(null);
-  const socketRef = useRef<any>(null); // eslint-disable-line @typescript-eslint/no-explicit-any
-  const lastPositionRef = useRef({ x: 0, y: 0 });
-  const [isMobile, setIsMobile] = useState(false);
+  const [canvasOffset, setCanvasOffset] = useState({ x: 0, y: 0 });
+  const lastPositionRef = useRef<{x: number, y: number} | null>(null);
 
-  // Detect mobile and prevent default touch behaviors
+  // Socket State
+  const socketRef = useRef<any>(null);
+
+  // Resize canvas to window size
   useEffect(() => {
-    const checkMobile = () => {
-      setIsMobile(/Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent));
+    const updateCanvasSize = () => {
+      setCanvasSize({
+        width: window.innerWidth - 40,
+        height: window.innerHeight - 250
+      });
     };
+
+    updateCanvasSize();
+    window.addEventListener('resize', updateCanvasSize);
     
-    checkMobile();
-    window.addEventListener('resize', checkMobile);
-
-    // Prevent default touch behaviors
-    const preventDefaults = (e: TouchEvent) => {
-      e.preventDefault();
-    };
-
-    document.addEventListener('touchstart', preventDefaults, { passive: false });
-    document.addEventListener('touchmove', preventDefaults, { passive: false });
-    document.addEventListener('touchend', preventDefaults, { passive: false });
-
     return () => {
-      window.removeEventListener('resize', checkMobile);
-      document.removeEventListener('touchstart', preventDefaults);
-      document.removeEventListener('touchmove', preventDefaults);
-      document.removeEventListener('touchend', preventDefaults);
+      window.removeEventListener('resize', updateCanvasSize);
     };
   }, []);
 
@@ -192,128 +212,207 @@ export default function Canvas() {
     };
   }, []);
 
-  // Prevent default touch move behavior and browser zoom
+  // Render lines when canvas size or lines change
   useEffect(() => {
-    document.body.style.touchAction = 'none';
-    return () => {
-      document.body.style.touchAction = 'auto';
-    };
-  }, []);
-
-  const getPointerPosition = useCallback(() => { // eslint-disable-line @typescript-eslint/no-explicit-any
-    if (!stageRef.current) return null;
+    const canvas = canvasRef.current;
+    const context = canvas?.getContext('2d');
     
-    const stage = stageRef.current;
-    const pointerPos = stage.getPointerPosition();
-    
-    if (!pointerPos) return null;
+    if (!canvas || !context) return;
 
-    return {
-      x: (pointerPos.x - canvasPosition.x) / canvasScale,
-      y: (pointerPos.y - canvasPosition.y) / canvasScale
+    // Clear canvas
+    context.clearRect(0, 0, canvas.width, canvas.height);
+
+    // Save context
+    context.save();
+
+    // Apply scaling and translation
+    context.translate(canvasOffset.x, canvasOffset.y);
+    context.scale(canvasScale, canvasScale);
+
+    // Redraw all lines
+    lines.forEach(line => {
+      context.beginPath();
+      context.strokeStyle = line.color;
+      context.lineWidth = line.strokeWidth / canvasScale;
+      context.lineCap = 'round';
+      context.lineJoin = 'round';
+      context.globalCompositeOperation = line.tool === 'eraser' 
+        ? 'destination-out' 
+        : 'source-over';
+
+      for (let i = 0; i < line.points.length; i += 2) {
+        const x = line.points[i];
+        const y = line.points[i + 1];
+
+        if (i === 0) {
+          context.moveTo(x, y);
+        } else {
+          context.lineTo(x, y);
+        }
+      }
+      
+      context.stroke();
+    });
+
+    // Restore context
+    context.restore();
+  }, [lines, canvasSize, canvasScale, canvasOffset]);
+
+  // Get canvas coordinates
+  const getCanvasCoordinates = useCallback((e: React.MouseEvent | React.TouchEvent) => {
+    const canvas = canvasRef.current;
+    if (!canvas) return null;
+
+    const rect = canvas.getBoundingClientRect();
+    let clientX, clientY;
+
+    if ('touches' in e) {
+      const touch = (e as React.TouchEvent).touches[0];
+      clientX = touch.clientX;
+      clientY = touch.clientY;
+    } else {
+      const mouse = e as React.MouseEvent;
+      clientX = mouse.clientX;
+      clientY = mouse.clientY;
+    }
+
+    // Adjust for canvas scaling and offset
+    const x = (clientX - rect.left - canvasOffset.x) / canvasScale;
+    const y = (clientY - rect.top - canvasOffset.y) / canvasScale;
+
+    return { x, y };
+  }, [canvasScale, canvasOffset]);
+
+  // Start drawing or panning
+  const startInteraction = useCallback((e: React.MouseEvent | React.TouchEvent) => {
+    e.preventDefault();
+    const coords = getCanvasCoordinates(e);
+    if (!coords) return;
+  
+    // Consistent way to get initial position for both mouse and touch events
+    const initialPos = {
+      x: 'touches' in e 
+        ? (e as React.TouchEvent).touches[0].clientX 
+        : (e as React.MouseEvent).clientX,
+      y: 'touches' in e 
+        ? (e as React.TouchEvent).touches[0].clientY 
+        : (e as React.MouseEvent).clientY
     };
-  }, [canvasPosition, canvasScale]);
-
-  const handleMouseDown = (e: any) => { // eslint-disable-line @typescript-eslint/no-explicit-any
-    const pos = getPointerPosition();
-    if (!pos) return;
-
+  
+    // Always set last position, even for drawing
+    lastPositionRef.current = initialPos;
+  
+    if (tool === 'hand') {
+      // Prepare for panning
+      setIsDrawing(true);
+      return;
+    }
+  
+    // Start drawing
     setIsDrawing(true);
-    setLines((prevLines) => [
-      ...prevLines,
+    setLines(prev => [
+      ...prev, 
       { 
         tool, 
-        points: [pos.x, pos.y], 
+        points: [coords.x, coords.y], 
         color, 
         strokeWidth 
       }
     ]);
+  }, [tool, color, strokeWidth, getCanvasCoordinates]);
 
-    // For mobile, store initial touch position for potential panning
-    const touchPos = e.evt || e.touches?.[0];
-    if (touchPos) {
-      lastPositionRef.current = { 
-        x: touchPos.clientX || touchPos.pageX, 
-        y: touchPos.clientY || touchPos.pageY 
-      };
+  // Draw or pan
+  const continueInteraction = useCallback((e: React.MouseEvent | React.TouchEvent) => {
+    if (!isDrawing) return;
+    e.preventDefault();
+    
+    const coords = getCanvasCoordinates(e);
+    
+    // Ensure we have both coords and last position
+    const currentPos = {
+      x: 'touches' in e 
+        ? (e as React.TouchEvent).touches[0].clientX 
+        : (e as React.MouseEvent).clientX,
+      y: 'touches' in e 
+        ? (e as React.TouchEvent).touches[0].clientY 
+        : (e as React.MouseEvent).clientY
+    };
+  
+    // Defensive check for last position
+    if (!lastPositionRef.current) {
+      lastPositionRef.current = currentPos;
+      return;
     }
-  };
-
-  const handleMouseMove = (e: any) => { // eslint-disable-line @typescript-eslint/no-explicit-any
-    const pos = getPointerPosition();
-    if (!isDrawing || !pos) return;
-
-    // For touch devices, check if it's a drawing or panning action
-    const touchPos = e.evt || e.touches?.[0];
-    if (isMobile && touchPos) {
-      const currentPos = { 
-        x: touchPos.clientX || touchPos.pageX, 
-        y: touchPos.clientY || touchPos.pageY 
-      };
-
-      // Determine if it's a pan or draw based on movement
-      const deltaX = Math.abs(currentPos.x - lastPositionRef.current.x);
-      const deltaY = Math.abs(currentPos.y - lastPositionRef.current.y);
-
-      // If movement is significant, consider it a pan
-      if (deltaX > 10 || deltaY > 10) {
-        // Pan the canvas
-        setCanvasPosition(prev => ({
-          x: prev.x + (currentPos.x - lastPositionRef.current.x),
-          y: prev.y + (currentPos.y - lastPositionRef.current.y)
-        }));
-        lastPositionRef.current = currentPos;
-        return;
-      }
+  
+    if (tool === 'hand') {
+      // Panning with robust null checking
+      setCanvasOffset(prev => ({
+        x: prev.x + (currentPos.x - lastPositionRef.current!.x),
+        y: prev.y + (currentPos.y - lastPositionRef.current!.y)
+      }));
+      
+      // Update last position
+      lastPositionRef.current = currentPos;
+      return;
     }
 
     // Drawing logic
-    setLines((prevLines) => {
-      const newLines = [...prevLines];
+    if (!coords) return;
+
+    setLines(prev => {
+      const newLines = [...prev];
       const lastLine = newLines[newLines.length - 1];
       
       if (lastLine) {
-        lastLine.points = [...lastLine.points, pos.x, pos.y];
+        lastLine.points = [...lastLine.points, coords.x, coords.y];
         newLines[newLines.length - 1] = lastLine;
       }
       
       return newLines;
     });
 
-    // Emit drawing data to other clients
     socketRef.current?.emit('drawing', lines[lines.length - 1]);
-  };
+    lastPositionRef.current = currentPos;
+  }, [isDrawing, tool, lines, getCanvasCoordinates]);
 
-  const handleMouseUp = () => {
+  // Stop drawing or panning
+  const stopInteraction = useCallback((e: React.MouseEvent | React.TouchEvent) => {
+    e.preventDefault();
     setIsDrawing(false);
-  };
+    lastPositionRef.current = null;
+  }, []);
 
-  const clearCanvas = () => {
+  // Zoom functions
+  const zoomIn = useCallback(() => {
+    setCanvasScale(prev => Math.min(prev * 1.2, 3));
+  }, []);
+
+  const zoomOut = useCallback(() => {
+    setCanvasScale(prev => Math.max(prev / 1.2, 0.5));
+  }, []);
+
+  // Wheel zoom
+  const handleWheel = useCallback((e: React.WheelEvent) => {
+    e.preventDefault();
+    
+    // Determine zoom direction
+    const delta = e.deltaY < 0 ? 1.1 : 0.9;
+    
+    // Calculate new scale
+    const newScale = canvasScale * delta;
+    
+    // Limit zoom
+    const limitedScale = Math.min(Math.max(newScale, 0.5), 3);
+    
+    // Update scale
+    setCanvasScale(limitedScale);
+  }, [canvasScale]);
+
+  // Clear canvas
+  const clearCanvas = useCallback(() => {
     setLines([]);
     socketRef.current?.emit('clear-canvas');
-  };
-
-  // Pinch to zoom for mobile
-  const handleWheel = (e: any) => { // eslint-disable-line @typescript-eslint/no-explicit-any
-    e.evt.preventDefault();
-    const scaleBy = 1.1;
-    const stage = e.target.getStage();
-    const oldScale = stage.scaleX();
-    const pointer = stage.getPointerPosition();
-
-    const mousePointTo = {
-      x: (pointer.x - stage.x()) / oldScale,
-      y: (pointer.y - stage.y()) / oldScale,
-    };
-
-    const newScale = e.evt.deltaY > 0 ? oldScale / scaleBy : oldScale * scaleBy;
-
-    setCanvasScale(newScale);
-    setCanvasPosition({
-      x: pointer.x - mousePointTo.x * newScale,
-      y: pointer.y - mousePointTo.y * newScale
-    });
-  };
+  }, []);
 
   return (
     <>
@@ -322,48 +421,30 @@ export default function Canvas() {
         color={color}
         strokeWidth={strokeWidth}
         isColorPickerOpen={isColorPickerOpen}
+        canvasScale={canvasScale}
         setTool={setTool}
         setColor={setColor}
         setStrokeWidth={setStrokeWidth}
         setIsColorPickerOpen={setIsColorPickerOpen}
         clearCanvas={clearCanvas}
+        zoomIn={zoomIn}
+        zoomOut={zoomOut}
       />
 
       <div className="bg-white shadow-md rounded-lg overflow-hidden">
-        <Stage
-          width={window.innerWidth - 40}
-          height={window.innerHeight - 250}
-          onMouseDown={handleMouseDown}
-          onMouseMove={handleMouseMove}
-          onMouseUp={handleMouseUp}
-          onTouchStart={handleMouseDown}
-          onTouchMove={handleMouseMove}
-          onTouchEnd={handleMouseUp}
-          onWheel={handleWheel}
-          x={canvasPosition.x}
-          y={canvasPosition.y}
-          scaleX={canvasScale}
-          scaleY={canvasScale}
-          ref={stageRef}
+      <canvas
+          ref={canvasRef}
+          width={canvasSize.width}
+          height={canvasSize.height}
           className="bg-white touch-none"
-        >
-          <Layer>
-            {lines.map((line, i) => (
-              <Line
-                key={i}
-                points={line.points}
-                stroke={line.color}
-                strokeWidth={line.strokeWidth}
-                tension={0.5}
-                lineCap="round"
-                lineJoin="round"
-                globalCompositeOperation={
-                  line.tool === 'eraser' ? 'destination-out' : 'source-over'
-                }
-              />
-            ))}
-          </Layer>
-        </Stage>
+          onMouseDown={startInteraction}
+          onMouseMove={continueInteraction}
+          onMouseUp={stopInteraction}
+          onMouseOut={stopInteraction}
+          onTouchStart={startInteraction}
+          onTouchMove={continueInteraction}
+          onTouchEnd={stopInteraction}
+        />
       </div>
     </>
   );
